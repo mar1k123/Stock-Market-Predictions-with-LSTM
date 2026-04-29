@@ -194,3 +194,4 @@ __pycache__/
 data/raw/
 models/
 .DS_Store
+.idea/
