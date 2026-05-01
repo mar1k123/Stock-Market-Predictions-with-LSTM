@@ -1,29 +1,57 @@
-from pathlib import Path
+from pandas_datareader import data
+import pandas as pd
+import datetime as dt
+import urllib.request, json
+import os
 
-from loguru import logger
-from tqdm import tqdm
-import typer
+data_source = 'kaggle' # alphavantage or kaggle
 
-from stock_market_lstm.config import PROCESSED_DATA_DIR, RAW_DATA_DIR
+if data_source == 'alphavantage':
+    # ====================== Loading Data from Alpha Vantage ==================================
 
-app = typer.Typer()
+    api_key = '<your API key>'
 
+    # American Airlines stock market prices
+    ticker = "AAL"
 
-@app.command()
-def main(
-    # ---- REPLACE DEFAULT PATHS AS APPROPRIATE ----
-    input_path: Path = RAW_DATA_DIR / "dataset.csv",
-    output_path: Path = PROCESSED_DATA_DIR / "dataset.csv",
-    # ----------------------------------------------
-):
-    # ---- REPLACE THIS WITH YOUR OWN CODE ----
-    logger.info("Processing dataset...")
-    for i in tqdm(range(10), total=10):
-        if i == 5:
-            logger.info("Something happened for iteration 5.")
-    logger.success("Processing dataset complete.")
-    # -----------------------------------------
+    # JSON file with all the stock market data for AAL from the last 20 years
+    url_string = "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=%s&outputsize=full&apikey=%s"%(ticker,api_key)
 
+    # Save data to this file
+    file_to_save = os.path.join(
+        "data",
+        "raw",
+        f"stock_market_data-{ticker}.csv"
+    )
 
-if __name__ == "__main__":
-    app()
+    # If you haven't already saved data,
+    # Go ahead and grab the data from the url
+    # And store date, low, high, volume, close, open values to a Pandas DataFrame
+    if not os.path.exists(file_to_save):
+        with urllib.request.urlopen(url_string) as url:
+            data = json.loads(url.read().decode())
+            # extract stock market data
+            data = data['Time Series (Daily)']
+            df = pd.DataFrame(columns=['Date','Low','High','Close','Open'])
+            for k,v in data.items():
+                date = dt.datetime.strptime(k, '%Y-%m-%d')
+                data_row = [date.date(),float(v['3. low']),float(v['2. high']),
+                            float(v['4. close']),float(v['1. open'])]
+                df.loc[-1,:] = data_row
+                df.index = df.index + 1
+        print('Data saved to : %s'%file_to_save)
+        df.to_csv(file_to_save)
+
+    # If the data is already there, just load it from the CSV
+    else:
+        print('File already exists. Loading data from CSV')
+        df = pd.read_csv(file_to_save)
+
+else:
+
+    # ====================== Loading Data from Kaggle ==================================
+    # You will be using HP's data. Feel free to experiment with other data.
+    # But while doing so, be careful to have a large enough dataset and also pay attention to the data normalization
+    df = pd.read_csv(os.path.join('Stocks','hpq.us.txt'),delimiter=',',usecols=['Date','Open','High','Low','Close'])
+    print('Loaded data from the Kaggle repository')
+
