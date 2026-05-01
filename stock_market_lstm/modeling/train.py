@@ -1,6 +1,9 @@
 import tensorflow as tf
 import numpy as np
 
+from stock_market_lstm.features import train_data, all_mid_data
+tf.compat.v1.disable_eager_execution()
+
 
 class DataGeneratorSeq(object):
 
@@ -65,31 +68,50 @@ num_nodes = [200,200,150] # Number of hidden nodes in each layer of the deep LST
 n_layers = len(num_nodes) # number of layers
 dropout = 0.2 # dropout amount
 
-tf.reset_default_graph() # This is important in case you run this multiple times
+tf.compat.v1.reset_default_graph() # This is important in case you run this multiple times
 
 # Input data.
 train_inputs, train_outputs = [],[]
 
 # You unroll the input over time defining placeholders for each time step
 for ui in range(num_unrollings):
-    train_inputs.append(tf.placeholder(tf.float32, shape=[batch_size,D],name='train_inputs_%d'%ui))
-    train_outputs.append(tf.placeholder(tf.float32, shape=[batch_size,1], name = 'train_outputs_%d'%ui))
+    train_inputs.append(
+        tf.compat.v1.placeholder(tf.float32, shape=[batch_size, D], name='train_inputs_%d' % ui)
+    )
+    train_outputs.append(
+        tf.compat.v1.placeholder(tf.float32, shape=[batch_size, 1], name='train_outputs_%d' % ui)
+    )
 
 lstm_cells = [
-    tf.contrib.rnn.LSTMCell(num_units=num_nodes[li],
-                            state_is_tuple=True,
-                            initializer= tf.contrib.layers.xavier_initializer()
-                           )
- for li in range(n_layers)]
+    tf.compat.v1.nn.rnn_cell.LSTMCell(
+        num_units=num_nodes[li],
+        initializer=tf.keras.initializers.GlorotUniform()
+    )
+    for li in range(n_layers)
+]
 
-drop_lstm_cells = [tf.contrib.rnn.DropoutWrapper(
-    lstm, input_keep_prob=1.0,output_keep_prob=1.0-dropout, state_keep_prob=1.0-dropout
-) for lstm in lstm_cells]
-drop_multi_cell = tf.contrib.rnn.MultiRNNCell(drop_lstm_cells)
-multi_cell = tf.contrib.rnn.MultiRNNCell(lstm_cells)
+drop_lstm_cells = [
+    tf.compat.v1.nn.rnn_cell.DropoutWrapper(
+        lstm,
+        input_keep_prob=1.0,
+        output_keep_prob=1.0 - dropout
+    )
+    for lstm in lstm_cells
+]
 
-w = tf.get_variable('w',shape=[num_nodes[-1], 1], initializer=tf.contrib.layers.xavier_initializer())
-b = tf.get_variable('b',initializer=tf.random_uniform([1],-0.1,0.1))
+
+drop_multi_cell = tf.compat.v1.nn.rnn_cell.MultiRNNCell(drop_lstm_cells)
+multi_cell = tf.compat.v1.nn.rnn_cell.MultiRNNCell(lstm_cells)
+w = tf.Variable(
+    tf.keras.initializers.GlorotUniform()(
+        shape=[num_nodes[-1], 1]
+    ),
+    trainable=True
+)
+b = tf.compat.v1.get_variable(
+    'b',
+    initializer=tf.random.uniform([1], -0.1, 0.1)
+)
 
 
 # Create cell state and hidden state variables to maintain the state of the LSTM
@@ -98,20 +120,24 @@ initial_state = []
 for li in range(n_layers):
   c.append(tf.Variable(tf.zeros([batch_size, num_nodes[li]]), trainable=False))
   h.append(tf.Variable(tf.zeros([batch_size, num_nodes[li]]), trainable=False))
-  initial_state.append(tf.contrib.rnn.LSTMStateTuple(c[li], h[li]))
+  initial_state.append(tf.compat.v1.nn.rnn_cell.LSTMStateTuple(c[li], h[li]))
 
 # Do several tensor transofmations, because the function dynamic_rnn requires the output to be of
 # a specific format. Read more at: https://www.tensorflow.org/api_docs/python/tf/nn/dynamic_rnn
 all_inputs = tf.concat([tf.expand_dims(t,0) for t in train_inputs],axis=0)
 
 # all_outputs is [seq_length, batch_size, num_nodes]
-all_lstm_outputs, state = tf.nn.dynamic_rnn(
-    drop_multi_cell, all_inputs, initial_state=tuple(initial_state),
-    time_major = True, dtype=tf.float32)
+all_lstm_outputs, state = tf.compat.v1.nn.dynamic_rnn(
+    drop_multi_cell,
+    all_inputs,
+    initial_state=tuple(initial_state),
+    time_major=True,
+    dtype=tf.float32
+)
 
 all_lstm_outputs = tf.reshape(all_lstm_outputs, [batch_size*num_unrollings,num_nodes[-1]])
 
-all_outputs = tf.nn.xw_plus_b(all_lstm_outputs,w,b)
+all_outputs = tf.matmul(all_lstm_outputs, w) + b
 
 split_outputs = tf.split(all_outputs,num_unrollings,axis=0)
 
@@ -119,55 +145,81 @@ split_outputs = tf.split(all_outputs,num_unrollings,axis=0)
 # loss of all the unrolled steps at the same time
 # Therefore, take the mean error or each batch and get the sum of that over all the unrolled steps
 
-print('Defining training Loss')
 loss = 0.0
-with tf.control_dependencies([tf.assign(c[li], state[li][0]) for li in range(n_layers)]+
-                             [tf.assign(h[li], state[li][1]) for li in range(n_layers)]):
-  for ui in range(num_unrollings):
-    loss += tf.reduce_mean(0.5*(split_outputs[ui]-train_outputs[ui])**2)
+
+assign_ops = (
+    [c[li].assign(state[li][0]) for li in range(n_layers)] +
+    [h[li].assign(state[li][1]) for li in range(n_layers)]
+)
+
+with tf.control_dependencies(assign_ops):
+    for ui in range(num_unrollings):
+        loss += tf.reduce_mean(0.5 * (split_outputs[ui] - train_outputs[ui]) ** 2)
 
 print('Learning rate decay operations')
-global_step = tf.Variable(0, trainable=False)
-inc_gstep = tf.assign(global_step,global_step + 1)
-tf_learning_rate = tf.placeholder(shape=None,dtype=tf.float32)
-tf_min_learning_rate = tf.placeholder(shape=None,dtype=tf.float32)
+
+global_step = tf.Variable(0, trainable=False, dtype=tf.int32)
+
+inc_gstep = global_step.assign(global_step + 1)
+
+tf_learning_rate = tf.compat.v1.placeholder(shape=None, dtype=tf.float32)
+tf_min_learning_rate = tf.compat.v1.placeholder(shape=None, dtype=tf.float32)
 
 learning_rate = tf.maximum(
-    tf.train.exponential_decay(tf_learning_rate, global_step, decay_steps=1, decay_rate=0.5, staircase=True),
-    tf_min_learning_rate)
+    tf.compat.v1.train.exponential_decay(
+        tf_learning_rate,
+        global_step,
+        decay_steps=1,
+        decay_rate=0.5,
+        staircase=True
+    ),
+    tf_min_learning_rate
+)
 
 # Optimizer.
 print('TF Optimization operations')
-optimizer = tf.train.AdamOptimizer(learning_rate)
-gradients, v = zip(*optimizer.compute_gradients(loss))
+optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate)
+gradients, variables = zip(*optimizer.compute_gradients(loss))
 gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-optimizer = optimizer.apply_gradients(
-    zip(gradients, v))
+optimizer = optimizer.apply_gradients(zip(gradients, variables))
 
 print('\tAll done')
 
 print('Defining prediction related TF functions')
 
-sample_inputs = tf.placeholder(tf.float32, shape=[1,D])
+sample_inputs = tf.compat.v1.placeholder(tf.float32, shape=[1, D])
 
 # Maintaining LSTM state for prediction stage
 sample_c, sample_h, initial_sample_state = [],[],[]
 for li in range(n_layers):
-  sample_c.append(tf.Variable(tf.zeros([1, num_nodes[li]]), trainable=False))
-  sample_h.append(tf.Variable(tf.zeros([1, num_nodes[li]]), trainable=False))
-  initial_sample_state.append(tf.contrib.rnn.LSTMStateTuple(sample_c[li],sample_h[li]))
+    sample_c.append(tf.Variable(tf.zeros([1, num_nodes[li]]), trainable=False))
+    sample_h.append(tf.Variable(tf.zeros([1, num_nodes[li]]), trainable=False))
 
-reset_sample_states = tf.group(*[tf.assign(sample_c[li],tf.zeros([1, num_nodes[li]])) for li in range(n_layers)],
-                               *[tf.assign(sample_h[li],tf.zeros([1, num_nodes[li]])) for li in range(n_layers)])
+    initial_sample_state.append(
+        tf.compat.v1.nn.rnn_cell.LSTMStateTuple(sample_c[li], sample_h[li])
+    )
 
-sample_outputs, sample_state = tf.nn.dynamic_rnn(multi_cell, tf.expand_dims(sample_inputs,0),
-                                   initial_state=tuple(initial_sample_state),
-                                   time_major = True,
-                                   dtype=tf.float32)
+reset_sample_states = tf.compat.v1.group(
+    *[tf.compat.v1.assign(sample_c[li], tf.zeros([1, num_nodes[li]]))
+      for li in range(n_layers)],
+    *[tf.compat.v1.assign(sample_h[li], tf.zeros([1, num_nodes[li]]))
+      for li in range(n_layers)]
+)
 
-with tf.control_dependencies([tf.assign(sample_c[li],sample_state[li][0]) for li in range(n_layers)]+
-                              [tf.assign(sample_h[li],sample_state[li][1]) for li in range(n_layers)]):
-  sample_prediction = tf.nn.xw_plus_b(tf.reshape(sample_outputs,[1,-1]), w, b)
+sample_outputs, sample_state = tf.compat.v1.nn.dynamic_rnn(
+    multi_cell,
+    tf.expand_dims(sample_inputs, 0),
+    initial_state=tuple(initial_sample_state),
+    time_major=True,
+    dtype=tf.float32
+)
+
+with tf.control_dependencies(
+    [tf.compat.v1.assign(sample_c[li], sample_state[li][0]) for li in range(n_layers)] +
+    [tf.compat.v1.assign(sample_h[li], sample_state[li][1]) for li in range(n_layers)]
+):
+
+    sample_prediction = tf.matmul(tf.reshape(sample_outputs, [1, -1]), w) + b
 
 print('\tAll done')
 
@@ -177,15 +229,15 @@ valid_summary = 1 # Interval you make test predictions
 
 n_predict_once = 50 # Number of steps you continously predict for
 
-train_seq_length = train_data.size # Full length of the training data
+train_seq_length = len(train_data) # Full length of the training data
 
 train_mse_ot = [] # Accumulate Train losses
 test_mse_ot = [] # Accumulate Test loss
 predictions_over_time = [] # Accumulate predictions
 
-session = tf.InteractiveSession()
+session = tf.compat.v1.InteractiveSession()
 
-tf.global_variables_initializer().run()
+tf.compat.v1.global_variables_initializer().run()
 
 # Used for decaying learning rate
 loss_nondecrease_count = 0
@@ -200,7 +252,7 @@ data_gen = DataGeneratorSeq(train_data,batch_size,num_unrollings)
 x_axis_seq = []
 
 # Points you start your test predictions from
-test_points_seq = np.arange(11000,12000,50).tolist()
+test_points_seq = np.arange(50, len(all_mid_data) - n_predict_once, 5).tolist()
 
 for ep in range(epochs):
 
@@ -222,8 +274,8 @@ for ep in range(epochs):
 
     # ============================ Validation ==============================
     if (ep+1) % valid_summary == 0:
-
-      average_loss = average_loss/(valid_summary*(train_seq_length//batch_size))
+      denom = valid_summary * max(1, (train_seq_length // batch_size))
+      average_loss = average_loss / denom
 
       # The average loss
       if (ep+1)%valid_summary==0:
@@ -248,10 +300,13 @@ for ep in range(epochs):
 
         # Feed in the recent past behavior of stock prices
         # to make predictions from that point onwards
-        for tr_i in range(w_i-num_unrollings+1,w_i-1):
-          current_price = all_mid_data[tr_i]
-          feed_dict[sample_inputs] = np.array(current_price).reshape(1,1)
-          _ = session.run(sample_prediction,feed_dict=feed_dict)
+        for tr_i in range(w_i - num_unrollings + 1, w_i - 1):
+            if tr_i < 0 or tr_i >= len(all_mid_data):
+                continue
+
+            current_price = all_mid_data[tr_i]
+            feed_dict[sample_inputs] = np.array(current_price).reshape(1, 1)
+            _ = session.run(sample_prediction, feed_dict=feed_dict)
 
         feed_dict = {}
 
@@ -265,7 +320,7 @@ for ep in range(epochs):
 
           pred = session.run(sample_prediction,feed_dict=feed_dict)
 
-          our_predictions.append(np.asscalar(pred))
+          our_predictions.append(pred.item())
 
           feed_dict[sample_inputs] = np.asarray(pred).reshape(-1,1)
 
