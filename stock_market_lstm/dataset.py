@@ -2,8 +2,12 @@ import pandas as pd
 import datetime as dt
 import urllib.request, json
 import os
+from loguru import logger
 
 from stock_market_lstm.config import DATA_SOURCE, TICKER, ALPHAVANTAGE_API_KEY
+from stock_market_lstm.config import configure_logging
+
+configure_logging()
 
 
 def load_data():
@@ -30,7 +34,7 @@ def load_data():
 
             with urllib.request.urlopen(url_string) as url:
                 data = json.loads(url.read().decode())
-                print(data)
+                logger.debug("AlphaVantage response payload: {}", data)
                 if "Time Series (Daily)" not in data:
                     raise ValueError(f"AlphaVantage error: {data}")
 
@@ -49,10 +53,10 @@ def load_data():
                     ]
 
             df.to_csv(file_to_save, index=False)
-            print(f'Данные сохранены: {file_to_save}')
+            logger.info("Data saved: {}", file_to_save)
 
         else:
-            print('Файл уже существует, загружаем CSV')
+            logger.info("CSV already exists, loading from disk")
             df = pd.read_csv(file_to_save)
 
         return df
