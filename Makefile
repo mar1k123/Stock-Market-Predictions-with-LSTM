@@ -4,18 +4,23 @@
 
 PROJECT_NAME = stock-market-lstm
 PYTHON_VERSION = 3.11
-PYTHON_INTERPRETER = python
+UV = uv
+UV_INSTALL_URL = https://astral.sh/uv/install.sh
 
 #################################################################################
 # COMMANDS                                                                      #
 #################################################################################
 
 
-## Install Python dependencies
+## Install project dependencies (including dev tools) via uv
 .PHONY: requirements
-requirements:
-	$(PYTHON_INTERPRETER) -m pip install -U pip
-	$(PYTHON_INTERPRETER) -m pip install -r requirements.txt
+requirements: ensure_uv
+	$(UV) sync --all-extras
+
+## Ensure uv is installed (installs with curl when missing)
+.PHONY: ensure_uv
+ensure_uv:
+	@command -v $(UV) >/dev/null 2>&1 || (echo "uv not found, installing..." && curl -LsSf $(UV_INSTALL_URL) | sh)
 	
 
 
@@ -29,29 +34,29 @@ clean:
 
 ## Lint using ruff (use `make format` to do formatting)
 .PHONY: lint
-lint:
-	ruff format --check
-	ruff check
+lint: ensure_uv
+	$(UV) run ruff format --check
+	$(UV) run ruff check
 
 ## Format source code with ruff
 .PHONY: format
-format:
-	ruff check --fix
-	ruff format
+format: ensure_uv
+	$(UV) run ruff check --fix
+	$(UV) run ruff format
 
 
 
 ## Run tests
 .PHONY: test
-test:
-	python -m pytest tests
+test: ensure_uv
+	$(UV) run python -m pytest tests
 
 
-## Set up Python interpreter environment
+## Create project virtual environment via uv
 .PHONY: create_environment
-create_environment:
-	@bash -c "if [ ! -z `which virtualenvwrapper.sh` ]; then source `which virtualenvwrapper.sh`; mkvirtualenv $(PROJECT_NAME) --python=$(PYTHON_INTERPRETER); else mkvirtualenv.bat $(PROJECT_NAME) --python=$(PYTHON_INTERPRETER); fi"
-	@echo ">>> New virtualenv created. Activate with:\nworkon $(PROJECT_NAME)"
+create_environment: ensure_uv
+	$(UV) venv --python $(PYTHON_VERSION)
+	@echo ">>> Virtual environment created in .venv"
 	
 
 
@@ -64,7 +69,7 @@ create_environment:
 ## Make dataset
 .PHONY: data
 data: requirements
-	$(PYTHON_INTERPRETER) stock_market_lstm/dataset.py
+	$(UV) run python stock_market_lstm/dataset.py
 
 
 #################################################################################
@@ -83,4 +88,4 @@ endef
 export PRINT_HELP_PYSCRIPT
 
 help:
-	@$(PYTHON_INTERPRETER) -c "${PRINT_HELP_PYSCRIPT}" < $(MAKEFILE_LIST)
+	@python -c "${PRINT_HELP_PYSCRIPT}" < $(MAKEFILE_LIST)
