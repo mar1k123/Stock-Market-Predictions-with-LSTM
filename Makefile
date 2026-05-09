@@ -1,91 +1,64 @@
-#################################################################################
-# GLOBALS                                                                       #
-#################################################################################
+# Makefile
+# Convenience commands for development and usage
 
-PROJECT_NAME = stock-market-lstm
-PYTHON_VERSION = 3.11
-UV = uv
-UV_INSTALL_URL = https://astral.sh/uv/install.sh
+.PHONY: install install-dev train predict test test-cov clean notebook demo help
 
-#################################################################################
-# COMMANDS                                                                      #
-#################################################################################
+# Default Python interpreter
+PYTHON = python
+PIP = pip
 
+install:
+	@echo "Installing stock_market_lstm..."
+	$(PIP) install -e .
+	@echo "Done! Use 'stock-predict --help' to get started."
+	@echo "Or run 'make demo' for a quick demo."
 
-## Install project dependencies (including dev tools) via uv
-.PHONY: requirements
-requirements: ensure_uv
-	$(UV) sync --all-extras
+install-dev:
+	@echo "Installing with development dependencies..."
+	$(PIP) install -e ".[dev]"
+	@echo "Dev installation complete. Tests and notebooks are available."
 
-## Ensure uv is installed (installs with curl when missing)
-.PHONY: ensure_uv
-ensure_uv:
-	@command -v $(UV) >/dev/null 2>&1 || (echo "uv not found, installing..." && curl -LsSf $(UV_INSTALL_URL) | sh)
-	
+train:
+	@echo "Training model on sample data..."
+	stock-predict train examples/sample_data.csv --epochs 10 --save models/demo.h5
 
+predict:
+	@echo "Making predictions with trained model..."
+	stock-predict predict examples/sample_data.csv models/demo.h5 --steps 30
 
+demo: train predict
+	@echo ""
+	@echo "Demo complete! Check models/ for the trained model."
 
-## Delete all compiled Python files
-.PHONY: clean
+test:
+	@echo "Running tests..."
+	pytest tests/ -v
+
+test-cov:
+	@echo "Running tests with coverage report..."
+	pytest tests/ -v --cov=stock_market_lstm --cov-report=term-missing
+
 clean:
-	find . -type f -name "*.py[co]" -delete
-	find . -type d -name "__pycache__" -delete
+	@echo "Cleaning up..."
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name .ipynb_checkpoints -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name *.egg-info -exec rm -rf {} + 2>/dev/null || true
+	rm -rf .pytest_cache
+	rm -rf dist build
+	@echo "Clean!"
 
-
-## Lint using ruff (use `make format` to do formatting)
-.PHONY: lint
-lint: ensure_uv
-	$(UV) run ruff format --check
-	$(UV) run ruff check
-
-## Format source code with ruff
-.PHONY: format
-format: ensure_uv
-	$(UV) run ruff check --fix
-	$(UV) run ruff format
-
-
-
-## Run tests
-.PHONY: test
-test: ensure_uv
-	$(UV) run python -m pytest tests
-
-
-## Create project virtual environment via uv
-.PHONY: create_environment
-create_environment: ensure_uv
-	$(UV) venv --python $(PYTHON_VERSION)
-	@echo ">>> Virtual environment created in .venv"
-	
-
-
-
-#################################################################################
-# PROJECT RULES                                                                 #
-#################################################################################
-
-
-## Make dataset
-.PHONY: data
-data: requirements
-	$(UV) run python stock_market_lstm/dataset.py
-
-
-#################################################################################
-# Self Documenting Commands                                                     #
-#################################################################################
-
-.DEFAULT_GOAL := help
-
-define PRINT_HELP_PYSCRIPT
-import re, sys; \
-lines = '\n'.join([line for line in sys.stdin]); \
-matches = re.findall(r'\n## (.*)\n[\s\S]+?\n([a-zA-Z_-]+):', lines); \
-print('Available rules:\n'); \
-print('\n'.join(['{:25}{}'.format(*reversed(match)) for match in matches]))
-endef
-export PRINT_HELP_PYSCRIPT
+notebook:
+	@echo "Starting Jupyter Lab..."
+	jupyter lab notebooks/
 
 help:
-	@python -c "${PRINT_HELP_PYSCRIPT}" < $(MAKEFILE_LIST)
+	@echo "Available commands:"
+	@echo "  make install      - Install the package"
+	@echo "  make install-dev  - Install with development tools"
+	@echo "  make train        - Train a demo model"
+	@echo "  make predict      - Make predictions with demo model"
+	@echo "  make demo         - Run full demo (train + predict)"
+	@echo "  make test         - Run all tests"
+	@echo "  make test-cov     - Run tests with coverage"
+	@echo "  make clean        - Remove generated files"
+	@echo "  make notebook     - Launch Jupyter Lab"

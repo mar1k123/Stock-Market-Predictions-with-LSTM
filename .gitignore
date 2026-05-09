@@ -189,9 +189,29 @@ cython_debug/
 
 # PyPI configuration file
 .pypircvenv/
-__pycache__/
 .ipynb_checkpoints/
 data/raw/
 models/
-.DS_Store
 .idea/
+
+# .gitignore additions (add to existing)
+
+# Environment variables with secrets
+
+# Data files (users provide their own)
+data/raw/*.csv
+data/interim/*
+data/processed/*
+
+# Trained models (large binary files)
+models/*.h5
+models/*.keras
+
+# Python
+
+# Jupyter
+
+# Testing
+
+# OS
+Thumbs.db

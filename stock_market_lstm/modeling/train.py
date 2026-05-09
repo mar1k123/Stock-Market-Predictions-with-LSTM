@@ -1,174 +1,288 @@
+# stock_market_lstm/modeling/train.py
+"""
+LSTM model for stock price time series prediction.
+Implements training, recursive forecasting, and model persistence.
+"""
+
 import numpy as np
 import tensorflow as tf
 from loguru import logger
-from tqdm import trange
 from tqdm.keras import TqdmCallback
-
-from stock_market_lstm.features import all_mid_data, train_data
-from stock_market_lstm.config import configure_logging
-
-configure_logging()
+from pathlib import Path
 
 
-class DataGeneratorSeq:
-    def __init__(self, prices: np.ndarray, batch_size: int, num_unroll: int):
-        self._prices = prices
-        self._prices_length = len(self._prices) - num_unroll
-        self._batch_size = batch_size
-        self._num_unroll = num_unroll
-        self._segments = self._prices_length // self._batch_size
-        self._cursor = [offset * self._segments for offset in range(self._batch_size)]
+class LSTMPredictor:
+    """
+    LSTM-based stock price predictor.
 
-    def next_batch(self) -> tuple[np.ndarray, np.ndarray]:
-        batch_data = np.zeros((self._batch_size), dtype=np.float32)
-        batch_labels = np.zeros((self._batch_size), dtype=np.float32)
+    Architecture:
+        LSTM(200) -> Dropout(0.2) -> LSTM(200) -> Dropout(0.2) -> LSTM(150) -> Dense(1)
 
-        for b in range(self._batch_size):
-            if self._cursor[b] + 1 >= self._prices_length:
-                self._cursor[b] = np.random.randint(0, (b + 1) * self._segments)
+    Workflow:
+        1. Build model: model.build()
+        2. Train: model.train(data, epochs=30)
+        3. Predict: predictions = model.forecast(data, start, context, steps)
+        4. Save: model.save("model.h5")
+        5. Load: model.load("model.h5")
 
-            batch_data[b] = self._prices[self._cursor[b]]
-            batch_labels[b] = self._prices[self._cursor[b] + np.random.randint(0, 5)]
-            self._cursor[b] = (self._cursor[b] + 1) % self._prices_length
+    Example:
+        model = LSTMPredictor(seq_len=50)
+        model.build()
+        model.train(train_data, epochs=30)
+        predictions = model.recursive_forecast(full_data, start_idx=1000, context=50, steps=30)
+        model.save("trained_model.h5")
+    """
 
-        return batch_data, batch_labels
+    def __init__(self, seq_len: int = 50):
+        """
+        Initialize LSTM predictor.
 
-    def unroll_batches(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        unroll_data, unroll_labels = [], []
-        for _ in range(self._num_unroll):
-            data, labels = self.next_batch()
-            unroll_data.append(data)
-            unroll_labels.append(labels)
-        return unroll_data, unroll_labels
+        Args:
+            seq_len: Number of past time steps to use for each prediction.
+                     Larger = more context, but slower training.
+        """
+        self.seq_len = seq_len
+        self.model = None
+        self.history = None
 
+    def build(self) -> "LSTMPredictor":
+        """
+        Build the LSTM model architecture.
+        Must be called before training.
 
-def build_sequences(series: np.ndarray, seq_len: int) -> tuple[np.ndarray, np.ndarray]:
-    x, y = [], []
-    for idx in range(seq_len, len(series)):
-        x.append(series[idx - seq_len : idx])
-        y.append(series[idx])
-    x_arr = np.array(x, dtype=np.float32).reshape(-1, seq_len, 1)
-    y_arr = np.array(y, dtype=np.float32).reshape(-1, 1)
-    return x_arr, y_arr
+        Returns:
+            self for method chaining
+        """
+        self.model = tf.keras.Sequential([
+            # Input: (batch, seq_len, 1) — time series window
+            tf.keras.layers.Input(shape=(self.seq_len, 1)),
 
+            # First LSTM layer with 200 units
+            # return_sequences=True passes full sequence to next LSTM
+            tf.keras.layers.LSTM(200, return_sequences=True),
+            tf.keras.layers.Dropout(0.2),  # Prevent overfitting
 
-def build_model(seq_len: int) -> tf.keras.Model:
-    model = tf.keras.Sequential(
-        [
-            tf.keras.layers.Input(shape=(seq_len, 1)),
+            # Second LSTM layer
             tf.keras.layers.LSTM(200, return_sequences=True),
             tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.LSTM(200, return_sequences=True),
-            tf.keras.layers.Dropout(0.2),
+
+            # Third LSTM layer
+            # return_sequences=False (default) — returns only last output
             tf.keras.layers.LSTM(150),
+
+            # Output: single predicted value
             tf.keras.layers.Dense(1),
-        ]
-    )
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-        loss=tf.keras.losses.MeanSquaredError(),
-    )
-    return model
+        ])
 
-
-def recursive_forecast(
-    model: tf.keras.Model, series: np.ndarray, start_index: int, context: int, steps: int
-) -> tuple[np.ndarray, float]:
-    history = list(series[start_index - context : start_index].astype(np.float32))
-    preds = []
-    mse = 0.0
-
-    for step in range(steps):
-        x_input = np.array(history[-context:], dtype=np.float32).reshape(1, context, 1)
-        pred = float(model.predict(x_input, verbose=0)[0, 0])
-        preds.append(pred)
-        history.append(pred)
-        target = float(series[start_index + step])
-        mse += 0.5 * ((pred - target) ** 2)
-
-    return np.array(preds, dtype=np.float32), mse / steps
-
-
-if __name__ == "__main__":
-    np.random.seed(42)
-    tf.random.set_seed(42)
-
-    seq_len = 50
-    batch_size = 500
-    epochs = 30
-    n_predict_once = 50
-
-    dg = DataGeneratorSeq(train_data, 5, 5)
-    u_data, u_labels = dg.unroll_batches()
-    for ui, (dat, lbl) in enumerate(zip(u_data, u_labels)):
-        logger.debug("Unrolled index {}", ui)
-        logger.debug("Inputs: {}", dat)
-        logger.debug("Output: {}", lbl)
-
-    x_train, y_train = build_sequences(train_data, seq_len)
-    model = build_model(seq_len)
-
-    lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor="loss", factor=0.5, patience=2, min_lr=1e-6, verbose=1
-    )
-
-    history = model.fit(
-        x_train,
-        y_train,
-        epochs=epochs,
-        batch_size=batch_size,
-        shuffle=False,
-        verbose=0,
-        callbacks=[lr_scheduler, TqdmCallback(verbose=1)],
-    )
-
-    train_mse_ot = [float(loss) for loss in history.history["loss"]]
-    test_mse_ot = []
-    predictions_over_time = []
-    x_axis_seq = []
-
-    max_forecast_horizon = max(1, len(all_mid_data) - seq_len - 1)
-    forecast_horizon = min(n_predict_once, max_forecast_horizon)
-    max_start_index = len(all_mid_data) - forecast_horizon
-
-    test_points_seq = np.arange(seq_len, max_start_index, 5).tolist()
-    if not test_points_seq and seq_len < max_start_index:
-        # Ensure at least one evaluation window for short datasets.
-        test_points_seq = [seq_len]
-
-    progress = trange(epochs, desc="Evaluating epochs", unit="epoch")
-    for ep in progress:
-        predictions_seq = []
-        mse_test_loss_seq = []
-
-        for w_i in test_points_seq:
-            preds, mse_loss = recursive_forecast(
-                model=model,
-                series=all_mid_data,
-                start_index=w_i,
-                context=seq_len,
-                steps=forecast_horizon,
-            )
-            predictions_seq.append(preds)
-            mse_test_loss_seq.append(mse_loss)
-
-            if ep == 0:
-                x_axis_seq.append(list(range(w_i, w_i + forecast_horizon)))
-
-        if mse_test_loss_seq:
-            current_test_mse = float(np.mean(mse_test_loss_seq))
-        else:
-            logger.warning(
-                "Skipping test MSE evaluation: not enough points (len={}, seq_len={}, horizon={})",
-                len(all_mid_data),
-                seq_len,
-                forecast_horizon,
-            )
-            current_test_mse = float("nan")
-        test_mse_ot.append(current_test_mse)
-        predictions_over_time.append(predictions_seq)
-        progress.set_postfix(
-            train_mse=f"{train_mse_ot[ep]:.6f}",
-            test_mse=f"{current_test_mse:.6f}",
+        self.model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+            loss=tf.keras.losses.MeanSquaredError(),
         )
 
+        logger.info(f"Model built: seq_len={self.seq_len}")
+        return self
+
+    def train(
+            self,
+            data: np.ndarray,
+            epochs: int = 30,
+            batch_size: int = 500,
+            validation_split: float = 0.0,
+            verbose: int = 1
+    ) -> tf.keras.callbacks.History:
+        """
+        Train the LSTM model on prepared data.
+
+        Args:
+            data: 1D array of preprocessed stock prices (EMA smoothed)
+            epochs: Number of training epochs. More = potentially better fit
+            batch_size: Samples per gradient update. Larger = faster but more memory
+            validation_split: Fraction of data to use for validation (0.0 to 1.0)
+            verbose: 0 = silent, 1 = progress bar
+
+        Returns:
+            Training history object (contains loss values per epoch)
+
+        Raises:
+            RuntimeError: If model hasn't been built yet
+        """
+        if self.model is None:
+            raise RuntimeError(
+                "Model not built! Call model.build() before training."
+            )
+
+        # Convert time series into supervised learning format
+        x_train, y_train = self._build_sequences(data)
+
+        logger.info(
+            f"Training on {len(x_train)} sequences "
+            f"({epochs} epochs, batch_size={batch_size})"
+        )
+
+        # Learning rate scheduler: reduce LR when loss plateaus
+        lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='loss',
+            factor=0.5,  # Multiply LR by 0.5 when triggered
+            patience=2,  # Wait 2 epochs before reducing
+            min_lr=1e-6,  # Don't go below this
+            verbose=1
+        )
+
+        callbacks = [lr_scheduler]
+        if verbose:
+            callbacks.append(TqdmCallback(verbose=1))
+
+        # Train the model
+        self.history = self.model.fit(
+            x_train,
+            y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=validation_split,
+            shuffle=False,  # Keep chronological order for time series
+            verbose=0,
+            callbacks=callbacks
+        )
+
+        final_loss = self.history.history['loss'][-1]
+        logger.info(f"Training complete. Final loss: {final_loss:.6f}")
+
+        return self.history
+
+    def recursive_forecast(
+            self,
+            series: np.ndarray,
+            start_index: int,
+            context: int = None,
+            steps: int = 50
+    ) -> np.ndarray:
+        """
+        Generate multi-step predictions using recursive forecasting.
+
+        At each step, the model uses its own previous prediction as input
+        to predict the next value. This is also called "autoregressive" prediction.
+
+        Args:
+            series: Full time series data (train + test)
+            start_index: Position to start predicting from
+            context: How many past values to use as initial context.
+                     Defaults to self.seq_len.
+            steps: How many steps to predict into the future
+
+        Returns:
+            Array of predicted values (length = steps)
+
+        Raises:
+            RuntimeError: If model hasn't been trained
+        """
+        if self.model is None:
+            raise RuntimeError("Model not trained! Call train() first.")
+
+        context = context or self.seq_len
+
+        # Use recent history as initial context for prediction
+        history = list(series[start_index - context: start_index].astype(np.float32))
+        predictions = []
+
+        for _ in range(steps):
+            # Take the last 'context' values and reshape for model input
+            x_input = np.array(history[-context:], dtype=np.float32).reshape(1, context, 1)
+
+            # Predict next value
+            pred = float(self.model.predict(x_input, verbose=0)[0, 0])
+            predictions.append(pred)
+
+            # Add prediction to history for next step
+            history.append(pred)
+
+        return np.array(predictions, dtype=np.float32)
+
+    def evaluate_forecast(
+            self,
+            series: np.ndarray,
+            start_index: int,
+            context: int = None,
+            steps: int = 50
+    ) -> tuple[np.ndarray, float]:
+        """
+        Make predictions and calculate Mean Squared Error.
+
+        Args:
+            series: Full time series data
+            start_index: Position to start predicting from
+            context: Context window size
+            steps: Prediction horizon
+
+        Returns:
+            Tuple of (predictions_array, mean_squared_error)
+        """
+        predictions = self.recursive_forecast(series, start_index, context, steps)
+
+        # Calculate MSE against actual values
+        targets = series[start_index: start_index + steps]
+        mse = np.mean((predictions - targets) ** 2)
+
+        return predictions, mse
+
+    def save(self, filepath: str) -> None:
+        """
+        Save trained model to disk.
+
+        Args:
+            filepath: Path to save the model (e.g., "models/my_model.h5")
+        """
+        if self.model is None:
+            raise RuntimeError("No model to save! Build and train a model first.")
+
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        self.model.save(filepath)
+        logger.info(f"Model saved to: {filepath}")
+
+    def load(self, filepath: str) -> "LSTMPredictor":
+        """
+        Load a saved model from disk.
+        The model can be used immediately for prediction without retraining.
+
+        Args:
+            filepath: Path to the saved model (.h5 file)
+
+        Returns:
+            self for method chaining
+
+        Raises:
+            FileNotFoundError: If the model file doesn't exist
+        """
+        filepath = Path(filepath)
+        if not filepath.exists():
+            raise FileNotFoundError(f"Model file not found: {filepath}")
+
+        self.model = tf.keras.models.load_model(filepath)
+        logger.info(f"Model loaded from: {filepath}")
+        return self
+
+    def _build_sequences(self, data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Convert time series into supervised learning format.
+
+        For each position i, creates:
+            X[i] = data[i-seq_len : i]     (input window)
+            y[i] = data[i]                  (target value)
+
+        Args:
+            data: 1D array of time series values
+
+        Returns:
+            Tuple of (X, y) where:
+                X shape = (n_samples, seq_len, 1)
+                y shape = (n_samples, 1)
+        """
+        x, y = [], []
+
+        for i in range(self.seq_len, len(data)):
+            x.append(data[i - self.seq_len: i])  # Past window
+            y.append(data[i])  # Current value
+
+        x_arr = np.array(x, dtype=np.float32).reshape(-1, self.seq_len, 1)
+        y_arr = np.array(y, dtype=np.float32).reshape(-1, 1)
+
+        return x_arr, y_arr
